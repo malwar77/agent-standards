@@ -1,0 +1,140 @@
+#!/usr/bin/env bash
+# agent-standards — shell entrypoint.
+#
+# Dual-mode by design:
+#   1. If python3 + the agent_standards package are available, delegate to the
+#      full Python CLI (discovery, BM25 retrieval, enforcement, evals).
+#   2. Otherwise fall back to a reduced pure-shell implementation
+#      (init / list / inject) so the basic loop works on any POSIX box.
+#
+# Force shell mode for testing with: AGENT_STANDARDS_NO_PYTHON=1
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+PROFILE="${AGENT_STANDARDS_PROFILE:-.agent-standards}"
+BASE="${AGENT_STANDARDS_BASE:-}"
+
+have_python() {
+  [ "${AGENT_STANDARDS_NO_PYTHON:-}" = "1" ] && return 1
+  command -v python3 >/dev/null 2>&1 || return 1
+  PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}" python3 -c "import agent_standards" >/dev/null 2>&1
+}
+
+if have_python; then
+  exec env PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}" \
+    AGENT_STANDARDS_PROFILE="$PROFILE" AGENT_STANDARDS_BASE="$BASE" \
+    python3 -m agent_standards.cli "$@"
+fi
+
+# ---------------------------------------------------------------- shell mode
+VERSION="0.1.0-shell"
+
+shell_help() {
+  cat <<'EOF'
+agent-standards (shell mode — reduced functionality)
+usage:
+  init [PATH]            create the project profile
+  list [PATH]            list standards (approved + candidates)
+  inject "query" [N]     print the N (default 3) most relevant standards
+  help                   this message
+shell mode supports init/list/inject only; discover/review/enforce/score
+require python3 (full CLI).
+EOF
+}
+
+standards_dirs() {
+  local proj="${1:-$PROFILE}"
+  [ -n "$BASE" ] && [ -d "$BASE/standards" ] && echo "$BASE/standards"
+  [ -d "$proj/standards" ] && echo "$proj/standards"
+}
+
+# Emit: id<TAB>title<TAB>score-material (title repeated 3x + tags + body)
+read_standard() {
+  awk -F'\t' '
+    function emit() { if (id != "") printf "%s\t%s\t%s\t%s\n", id, title, tags, body }
+    /^id:/    { sub(/^id:[ ]+/, "");    id=$0; body=""; next }
+    /^title:/ { sub(/^title:[ ]+/, ""); title=$0; next }
+    /^tags:/  { sub(/^tags:[ ]+/, "");  tags=$0; next }
+    /^body:/  {
+      b=$0; sub(/^body:[ ]+/, "", b)
+      if (b == "|" || b == "|-") { inbody=1; next }
+      if (b ~ /^\x27/) { sub(/^\x27/, "", b); sub(/\x27$/, "", b) }
+      else if (b ~ /^"/) { sub(/^"/, "", b); sub(/"$/, "", b) }
+      body=b; inbody=0; next
+    }
+    inbody && /^  / { sub(/^  /, ""); body = body $0 " "; next }
+    inbody { inbody=0 }
+    END { emit() }
+  ' "$1"
+}
+
+score_query() {
+  # $1 = text, rest = query words; prints match count
+  local text="$1"; shift
+  local total=0 w n
+  for w in "$@"; do
+    w="${w//[^A-Za-z0-9_]/}"
+    [ "${#w}" -ge 3 ] || continue   # skip 1-2 char noise like "I", "to"
+    # stem the query word too, then prefix match: "tests" -> "test"*
+    local stem="${w%s}"
+    [ "${#stem}" -lt 3 ] && stem="$w"
+    n=$(printf '%s' "$text" | grep -oiE -- "$stem[a-z0-9_]*" | wc -l || true)
+    total=$((total + n))
+  done
+  echo "$total"
+}
+
+shell_init() {
+  mkdir -p "${1:-$PROFILE}/standards"
+  if [ -n "$BASE" ]; then mkdir -p "$BASE/standards"; fi
+  echo "project profile: ${1:-$PROFILE}"
+  [ -n "$BASE" ] && echo "base profile:    $BASE"
+  echo "ready (shell mode)."
+}
+
+shell_list() {
+  local proj="${1:-$PROFILE}" found=0
+  while IFS= read -r dir; do
+    while IFS= read -r f; do
+      IFS=$'\t' read -r id title _ < <(read_standard "$f")
+      printf '%s\n' "$id — $title"
+      found=$((found + 1))
+    done < <(find "$dir" -name '*.yaml' -maxdepth 1 | sort)
+  done < <(standards_dirs "$proj")
+  [ "$found" -eq 0 ] && echo "no standards found (run discover via the python CLI)"
+  return 0
+}
+
+shell_inject() {
+  local query="$1" topk="${2:-3}" proj="${3:-$PROFILE}"
+  local -a words=()
+  read -r -a words <<< "$query"
+  local results=""
+  while IFS= read -r dir; do
+    while IFS= read -r f; do
+      local line id title tags body score
+      line="$(read_standard "$f")"
+      IFS=$'\t' read -r id title tags body <<< "$line"
+      score=$(score_query "$title $title $title $tags $body" "${words[@]}")
+      [ "$score" -gt 0 ] || continue
+      results+="$score"$'\t'"$id"$'\t'"$title"$'\t'"$body"$'\n'
+    done < <(find "$dir" -name '*.yaml' -maxdepth 1 | sort)
+  done < <(standards_dirs "$proj")
+  if [ -z "$results" ]; then
+    echo "no relevant standards found for: $query" >&2
+    return 1
+  fi
+  printf '%s' "$results" | sort -rn | head -n "$topk" | while IFS=$'\t' read -r score id title body; do
+    printf '### %s\n\n%s\n\n' "$title" "$(printf '%s' "$body" | sed 's/ *$//')"
+  done
+}
+
+cmd="${1:-help}"; [ $# -gt 0 ] && shift || true
+case "$cmd" in
+  --version|-v) echo "$VERSION" ;;
+  init)   shell_init "$@" ;;
+  list)   shell_list "$@" ;;
+  inject) shell_inject "$@" ;;
+  help|--help|-h) shell_help ;;
+  *) echo "unknown command: $cmd (shell mode — install python3 for full CLI)" >&2; shell_help; exit 2 ;;
+esac

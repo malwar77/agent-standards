@@ -29,6 +29,17 @@ from typing import Optional
 import yaml
 
 
+class _LiteralStr(str):
+    """str subclass rendered as a YAML literal block (body: |)."""
+
+
+def _represent_literal(dumper, data):
+    return dumper.represent_scalar("tag:yaml.org,2002:str", data, style="|")
+
+
+yaml.add_representer(_LiteralStr, _represent_literal, Dumper=yaml.SafeDumper)
+
+
 @dataclasses.dataclass
 class Evidence:
     observed: int = 0
@@ -115,9 +126,12 @@ class Store:
         return paths
 
     def save(self, std: Standard) -> str:
+        d = std.to_dict()
+        if d.get("body"):
+            d["body"] = _LiteralStr(d["body"].rstrip("\n") + "\n")
         target = os.path.join(self.project_dir, "standards", f"{std.id}.yaml")
         with open(target, "w", encoding="utf-8") as fh:
-            yaml.safe_dump(std.to_dict(), fh, sort_keys=False, allow_unicode=True)
+            yaml.safe_dump(d, fh, sort_keys=False, allow_unicode=True)
         return target
 
     def load_all(self, statuses=("approved",), include_critical_only: bool = False) -> list:
@@ -149,9 +163,11 @@ class Store:
             return 0
         moved = 0
         for std in self.load_all(statuses=("approved", "candidate")):
-            if std.source == "discovered" or True:
-                target = os.path.join(self.base_dir, "standards", f"{std.id}.yaml")
-                with open(target, "w", encoding="utf-8") as fh:
-                    yaml.safe_dump(std.to_dict(), fh, sort_keys=False, allow_unicode=True)
-                moved += 1
+            d = std.to_dict()
+            if d.get("body"):
+                d["body"] = _LiteralStr(d["body"].rstrip("\n") + "\n")
+            target = os.path.join(self.base_dir, "standards", f"{std.id}.yaml")
+            with open(target, "w", encoding="utf-8") as fh:
+                yaml.safe_dump(d, fh, sort_keys=False, allow_unicode=True)
+            moved += 1
         return moved

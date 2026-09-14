@@ -41,10 +41,28 @@ discover  →  review  →  index  →  inject  →  (optional) enforce  →  sc
 5. **Score** — measure whether changed code actually follows the standards
    that were injected.
 
+## Runs on shell *and* Python
+
+Two entrypoints, one system:
+
+```bash
+pip install -e .          # python CLI: discover/review/inject/enforce/score
+bin/agent-standards ...   # POSIX shell entrypoint
+```
+
+`bin/agent-standards` delegates to the full Python CLI when python3 is
+available, and falls back to a pure-shell implementation of the core loop
+(`init` / `list` / `inject` with grep-based lexical retrieval) on boxes with
+no Python. `install.sh` copies the agent command prompts into the current
+project (`.agent-standards/commands/`, plus `.claude/commands/` and/or
+`.cursor/rules/` if those dirs exist) — the Agent-OS-style markdown commands
+in `commands/` tell your coding agent how to drive the CLI.
+
 ## Install
 
 ```bash
-pip install -e .
+pip install -e .          # full CLI
+./install.sh              # in your project: profile + agent command prompts
 ```
 
 ## Usage

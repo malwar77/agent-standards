@@ -137,8 +137,11 @@ def build_parser():
     p = argparse.ArgumentParser(prog="agent-standards",
                                 description=__doc__)
     p.add_argument("--version", action="version", version=__version__)
-    p.add_argument("--profile", default=".agent-standards",
-                   help="project profile dir (default .agent-standards)")
+    p.add_argument("--profile",
+                   default=os.environ.get("AGENT_STANDARDS_PROFILE",
+                                          ".agent-standards"),
+                   help="project profile dir (default .agent-standards "
+                        "or $AGENT_STANDARDS_PROFILE)")
     p.add_argument("--base", default=None,
                    help="base profile dir (default $AGENT_STANDARDS_BASE)")
     sub = p.add_subparsers(dest="cmd", required=True)
