@@ -127,6 +127,31 @@ def cmd_list(args):
         print(f"{std.status:9} {std.id}{crit}\n{ev_line}")
 
 
+def cmd_export(args):
+    if args.path:
+        args.profile = args.path
+    store = _store(args)
+    stds = store.load_all(statuses=("approved", "candidate"))
+    data = {"profile": store.project_dir,
+            "standards": [s.to_dict() for s in stds]}
+    payload = json.dumps(data, indent=2)
+    out = args.output or os.path.join(store.project_dir, "standards.json")
+    os.makedirs(os.path.dirname(out), exist_ok=True)
+    with open(out, "w", encoding="utf-8") as fh:
+        fh.write(payload)
+    print(f"exported {len(stds)} standards -> {out}")
+    if args.dashboard:
+        tpl_path = os.path.join(os.path.dirname(__file__), "..",
+                                "dashboard", "template.html")
+        with open(tpl_path, encoding="utf-8") as fh:
+            tpl = fh.read()
+        dash = os.path.join(store.project_dir, "dashboard.html")
+        with open(dash, "w", encoding="utf-8") as fh:
+            fh.write(tpl.replace("__STANDARDS_JSON__", payload))
+        print(f"dashboard -> {dash} (self-contained; open in a browser)")
+    return 0
+
+
 def cmd_sync(args):
     store = _store(args)
     moved = store.sync_to_base()
@@ -178,6 +203,14 @@ def build_parser():
     s = sub.add_parser("score")
     s.add_argument("files", nargs="+")
     s.set_defaults(func=cmd_score)
+
+    x = sub.add_parser("export")
+    x.add_argument("path", nargs="?", default=None,
+                   help="project profile dir (default $AGENT_STANDARDS_PROFILE)")
+    x.add_argument("--output", default=None, help="standards.json path")
+    x.add_argument("--dashboard", action="store_true",
+                   help="also build a self-contained dashboard.html")
+    x.set_defaults(func=cmd_export)
 
     sub.add_parser("list").set_defaults(func=cmd_list)
     sub.add_parser("sync").set_defaults(func=cmd_sync)

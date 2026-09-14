@@ -41,22 +41,35 @@ discover  →  review  →  index  →  inject  →  (optional) enforce  →  sc
 5. **Score** — measure whether changed code actually follows the standards
    that were injected.
 
-## Runs on shell *and* Python
+## 50% shell / 30% Python / 20% HTML
 
-Two entrypoints, one system:
+One system, three layers:
 
 ```bash
-pip install -e .          # python CLI: discover/review/inject/enforce/score
-bin/agent-standards ...   # POSIX shell entrypoint
+bin/agent-standards init .      # shell layer: the whole user loop
+bin/agent-standards discover .  # heuristic counts; exact AST via python
+bin/agent-standards inject "add a retry wrapper"
+bin/agent-standards export . --dashboard
+bin/agent-standards serve       # live dashboard on localhost
 ```
 
-`bin/agent-standards` delegates to the full Python CLI when python3 is
-available, and falls back to a pure-shell implementation of the core loop
-(`init` / `list` / `inject` with grep-based lexical retrieval) on boxes with
-no Python. `install.sh` copies the agent command prompts into the current
-project (`.agent-standards/commands/`, plus `.claude/commands/` and/or
-`.cursor/rules/` if those dirs exist) — the Agent-OS-style markdown commands
-in `commands/` tell your coding agent how to drive the CLI.
+The *shell layer* (POSIX, mawk-safe) owns the interface: init, heuristic
+discover, list, lexical inject, JSON export, the self-contained dashboard
+build, serve, sync. It needs zero dependencies — python3 only upgrades it.
+
+The *Python layer* is the engine: exact AST discovery with evidence,
+BM25 retrieval, interactive review, enforcement gates, and evals. When
+python3 is present the shell entrypoint transparently delegates to it
+(`AGENT_STANDARDS_NO_PYTHON=1` forces the pure-shell path).
+
+The *HTML layer* is the dashboard: standards cards with evidence bars
+(followed/observed consistency), status and critical badges, live filter.
+`export --dashboard` builds a self-contained, double-clickable file;
+`serve` runs it live with `standards.json` fetched fresh.
+
+`install.sh` copies the Agent-OS-style agent command prompts
+(`commands/*.md`) into the current project — `.agent-standards/commands/`,
+plus `.claude/commands/` and `.cursor/rules/` where those exist.
 
 ## Install
 
@@ -73,6 +86,8 @@ agent-standards init                          # creates .agent-standards/
 agent-standards discover .                    # mine candidates (read-only)
 agent-standards review --auto-approve         # or interactive review
 agent-standards inject "add a retry wrapper for the API client"
+agent-standards export . --dashboard          # standards.json + dashboard.html
+agent-standards serve                         # live dashboard on :8765
 agent-standards enforce .                     # exit 1 on critical regression
 agent-standards score src/foo.py              # evals: changed-code consistency
 ```

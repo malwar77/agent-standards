@@ -1,18 +1,20 @@
 #!/usr/bin/env bash
-# agent-standards — shell entrypoint.
+# agent-standards — shell-first entrypoint (50% shell / 30% python / 20% html).
 #
-# Dual-mode by design:
-#   1. If python3 + the agent_standards package are available, delegate to the
-#      full Python CLI (discovery, BM25 retrieval, enforcement, evals).
-#   2. Otherwise fall back to a reduced pure-shell implementation
-#      (init / list / inject) so the basic loop works on any POSIX box.
+# The shell layer owns the whole user loop: init, discover (heuristic),
+# list, inject (lexical retrieval), export (JSON + dashboard), serve, sync.
+# python3, when present, upgrades accuracy: AST discovery, BM25 retrieval,
+# interactive review, enforcement, evals. The HTML dashboard renders the
+# standards and their evidence.
 #
-# Force shell mode for testing with: AGENT_STANDARDS_NO_PYTHON=1
+# Force the pure-shell path with: AGENT_STANDARDS_NO_PYTHON=1
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PROFILE="${AGENT_STANDARDS_PROFILE:-.agent-standards}"
 BASE="${AGENT_STANDARDS_BASE:-}"
+PORT="${AGENT_STANDARDS_PORT:-8765}"
+VERSION="0.1.0"
 
 have_python() {
   [ "${AGENT_STANDARDS_NO_PYTHON:-}" = "1" ] && return 1
@@ -20,41 +22,20 @@ have_python() {
   PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}" python3 -c "import agent_standards" >/dev/null 2>&1
 }
 
-if have_python; then
-  exec env PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}" \
-    AGENT_STANDARDS_PROFILE="$PROFILE" AGENT_STANDARDS_BASE="$BASE" \
-    python3 -m agent_standards.cli "$@"
-fi
-
-# ---------------------------------------------------------------- shell mode
-VERSION="0.1.0-shell"
-
-shell_help() {
-  cat <<'EOF'
-agent-standards (shell mode — reduced functionality)
-usage:
-  init [PATH]            create the project profile
-  list [PATH]            list standards (approved + candidates)
-  inject "query" [N]     print the N (default 3) most relevant standards
-  help                   this message
-shell mode supports init/list/inject only; discover/review/enforce/score
-require python3 (full CLI).
-EOF
-}
-
+# ------------------------------------------------------------- shared helpers
 standards_dirs() {
   local proj="${1:-$PROFILE}"
   [ -n "$BASE" ] && [ -d "$BASE/standards" ] && echo "$BASE/standards"
   [ -d "$proj/standards" ] && echo "$proj/standards"
 }
 
-# Emit: id<TAB>title<TAB>score-material (title repeated 3x + tags + body)
-read_standard() {
+read_standard() {   # -> id<TAB>title<TAB>tags<TAB>body
   awk -F'\t' '
-    function emit() { if (id != "") printf "%s\t%s\t%s\t%s\n", id, title, tags, body }
+    function emit() { if (id != "") printf "%s\t%s\t%s\t%s\n",
+                        id, title, (tags == "" ? "-" : tags), body }
     /^id:/    { sub(/^id:[ ]+/, "");    id=$0; body=""; next }
     /^title:/ { sub(/^title:[ ]+/, ""); title=$0; next }
-    /^tags:/  { sub(/^tags:[ ]+/, "");  tags=$0; next }
+    /^tags:/  { v=$0; sub(/^tags:[ ]*/, "", v); tags=v; next }
     /^body:/  {
       b=$0; sub(/^body:[ ]+/, "", b)
       if (b == "|" || b == "|-") { inbody=1; next }
@@ -68,28 +49,82 @@ read_standard() {
   ' "$1"
 }
 
-score_query() {
-  # $1 = text, rest = query words; prints match count
-  local text="$1"; shift
-  local total=0 w n
-  for w in "$@"; do
-    w="${w//[^A-Za-z0-9_]/}"
-    [ "${#w}" -ge 3 ] || continue   # skip 1-2 char noise like "I", "to"
-    # stem the query word too, then prefix match: "tests" -> "test"*
-    local stem="${w%s}"
-    [ "${#stem}" -lt 3 ] && stem="$w"
-    n=$(printf '%s' "$text" | grep -oiE -- "$stem[a-z0-9_]*" | wc -l || true)
-    total=$((total + n))
-  done
-  echo "$total"
+# ------------------------------------------------------------------- commands
+shell_help() {
+  cat <<EOF
+agent-standards $VERSION (shell layer)
+
+  init [PATH]              create the project profile
+  discover [PATH]          heuristic convention counts (python CLI: exact AST)
+  list [PATH]              list standards
+  inject "query" [N] [PATH] top-N most relevant standards for a task
+  export [PATH] [--dashboard] dump standards.json (+ self-contained dashboard.html)
+  serve [PORT]             serve profile as a live dashboard (http://localhost:PORT)
+  sync [PATH]              copy project standards to the base profile
+  review | enforce | score  python CLI required (exact AST / gates / evals)
+EOF
 }
 
 shell_init() {
-  mkdir -p "${1:-$PROFILE}/standards"
-  if [ -n "$BASE" ]; then mkdir -p "$BASE/standards"; fi
-  echo "project profile: ${1:-$PROFILE}"
+  local proj="${1:-$PROFILE}"
+  mkdir -p "$proj/standards"
+  [ -n "$BASE" ] && mkdir -p "$BASE/standards"
+  echo "project profile: $proj"
   [ -n "$BASE" ] && echo "base profile:    $BASE"
-  echo "ready (shell mode)."
+  echo "ready."
+}
+
+shell_discover() {
+  local root="${1:-.}"
+  local fdir=0 fsnake=0 ccls=0 cpasc=0 ds=0 dstot=0 tfiles=0 tok=0
+  local f
+  for f in $(find "$root" -name '*.py' \
+               -not -path '*/node_modules/*' -not -path '*/.git/*' \
+               -not -path '*/__pycache__/*' -not -path '*/.agent-standards/*' \
+             2>/dev/null | sort); do
+    while IFS= read -r line; do
+      fdir=$((fdir + 1))
+      case "$line" in
+        *'def '[a-z_]*'('*|*'def __'*) fsnake=$((fsnake + 1)) ;;
+      esac
+    done < <(grep -E '^[[:space:]]*(async )?def [A-Za-z_]' "$f" 2>/dev/null || true)
+    while IFS= read -r line; do
+      ccls=$((ccls + 1))
+      case "$line" in
+        'class '[A-Z]*) cpasc=$((cpasc + 1)) ;;
+        [[:space:]]'class '[A-Z]*) cpasc=$((cpasc + 1)) ;;
+      esac
+    done < <(grep -E '^[[:space:]]*class [A-Za-z_]' "$f" 2>/dev/null || true)
+    # docstring heuristic: triple-double-quote on the first non-blank line
+    # after a def/class. Command substitution (not a pipe) so counters persist.
+    line=$(awk '
+      /^[[:space:]]*(async )?def [A-Za-z_]/ || /^[[:space:]]*class [A-Za-z_]/ {
+        expect = 1; total++; next
+      }
+      expect && /^[[:space:]]*"""/ { ds++; expect = 0; next }
+      expect && /[^[:space:]]/ { expect = 0 }
+      END { if (total) printf "%d %d\n", total, ds + 0 }
+    ' "$f" 2>/dev/null || true)
+    if [ -n "$line" ]; then
+      set -- $line
+      dstot=$((dstot + $1)); ds=$((ds + $2))
+    fi
+  done
+  local tdir="$root/tests"
+  if [ -d "$tdir" ]; then
+    for f in "$tdir"/*.py; do
+      [ -e "$f" ] || continue
+      tfiles=$((tfiles + 1))
+      case "$(basename "$f")" in test_*.py) tok=$((tok + 1)) ;; esac
+    done
+  fi
+  pct() { [ "$1" -gt 0 ] && echo $(( 100 * $2 / $1 )) || echo 0; }
+  echo "heuristic discovery (shell; python CLI gives exact AST counts):"
+  echo "  functions   snake_case   $fsnake/$fdir ($(pct $fdir $fsnake)%)"
+  echo "  classes     PascalCase   $cpasc/$ccls ($(pct $ccls $cpasc)%)"
+  echo "  docstrings  present      $ds/$dstot ($(pct $dstot $ds)%)"
+  echo "  test files  test_*.py    $tok/$tfiles ($(pct $tfiles $tok)%)"
+  echo "  import order + annotations need the python CLI"
 }
 
 shell_list() {
@@ -99,42 +134,127 @@ shell_list() {
       IFS=$'\t' read -r id title _ < <(read_standard "$f")
       printf '%s\n' "$id — $title"
       found=$((found + 1))
-    done < <(find "$dir" -name '*.yaml' -maxdepth 1 | sort)
+    done < <(find "$dir" -maxdepth 1 -name '*.yaml' | sort)
   done < <(standards_dirs "$proj")
   [ "$found" -eq 0 ] && echo "no standards found (run discover via the python CLI)"
   return 0
+}
+
+score_query() {
+  local text="$1"; shift
+  local total=0 w n stem
+  for w in "$@"; do
+    w="${w//[^A-Za-z0-9_]/}"
+    [ "${#w}" -ge 3 ] || continue
+    stem="${w%s}"
+    [ "${#stem}" -lt 3 ] && stem="$w"
+    n=$(printf '%s' "$text" | grep -oiE -- "$stem[a-z0-9_]*" | wc -l || true)
+    total=$((total + n))
+  done
+  echo "$total"
 }
 
 shell_inject() {
   local query="$1" topk="${2:-3}" proj="${3:-$PROFILE}"
   local -a words=()
   read -r -a words <<< "$query"
-  local results=""
+  local results="" f dir score id title tags body line
   while IFS= read -r dir; do
     while IFS= read -r f; do
-      local line id title tags body score
       line="$(read_standard "$f")"
       IFS=$'\t' read -r id title tags body <<< "$line"
       score=$(score_query "$title $title $title $tags $body" "${words[@]}")
       [ "$score" -gt 0 ] || continue
       results+="$score"$'\t'"$id"$'\t'"$title"$'\t'"$body"$'\n'
-    done < <(find "$dir" -name '*.yaml' -maxdepth 1 | sort)
+    done < <(find "$dir" -maxdepth 1 -name '*.yaml' | sort)
   done < <(standards_dirs "$proj")
   if [ -z "$results" ]; then
     echo "no relevant standards found for: $query" >&2
     return 1
   fi
-  printf '%s' "$results" | sort -rn | head -n "$topk" | while IFS=$'\t' read -r score id title body; do
-    printf '### %s\n\n%s\n\n' "$title" "$(printf '%s' "$body" | sed 's/ *$//')"
-  done
+  printf '%s' "$results" | sort -rn | head -n "$topk" | \
+    while IFS=$'\t' read -r score id title body; do
+      printf '### %s\n\n%s\n\n' "$title" "$(printf '%s' "$body" | sed 's/ *$//')"
+    done
 }
 
+shell_export() {
+  local proj="${1:-$PROFILE}" dashboard=0 dashpath jsonfile
+  shift 2>/dev/null || true
+  [ "${1:-}" = "--dashboard" ] && dashboard=1
+  mkdir -p "$proj"
+  jsonfile="$proj/standards.json"
+  local out="" j f dir
+  while IFS= read -r dir; do
+    while IFS= read -r f; do
+      j=$(awk -f "$ROOT/scripts/yaml_to_json.awk" "$f")
+      [ -n "$j" ] && out="${out}${out:+,}
+$j"
+    done < <(find "$dir" -maxdepth 1 -name '*.yaml' | sort)
+  done < <(standards_dirs "$proj")
+  printf '{"profile": "%s",\n "standards": [%s]}\n' "$proj" "$out" > "$jsonfile"
+  echo "exported -> $jsonfile"
+  if [ "$dashboard" = "1" ]; then
+    dashpath="$proj/dashboard.html"
+    awk -v ph="__STANDARDS_JSON__" '
+      NR == FNR { json = json (FNR > 1 ? "\n" : "") $0; next }
+      { p = index($0, ph)
+        if (p) printf "%s%s%s\n", substr($0, 1, p - 1), json, substr($0, p + length(ph))
+        else print }
+    ' "$jsonfile" "$ROOT/dashboard/template.html" > "$dashpath"
+    echo "dashboard -> $dashpath (self-contained; open in a browser)"
+  fi
+  return 0
+}
+
+shell_serve() {
+  local port="${1:-$PORT}" proj="${2:-$PROFILE}"
+  mkdir -p "$proj"
+  command -v python3 >/dev/null 2>&1 || {
+    echo "serve needs python3 (use: export [PATH] --dashboard instead)" >&2
+    return 2
+  }
+  shell_export "$proj" >/dev/null
+  awk '{ sub(/__STANDARDS_JSON__/, "null"); print }' \
+    "$ROOT/dashboard/template.html" > "$proj/dashboard.html"
+  echo "serving $proj on http://localhost:$port (ctrl-c to stop)"
+  ( cd "$proj" && exec python3 -m http.server "$port" --bind 127.0.0.1 )
+}
+
+shell_sync() {
+  local proj="${1:-$PROFILE}"
+  [ -n "$BASE" ] || { echo "no base profile set (AGENT_STANDARDS_BASE)" >&2; return 2; }
+  mkdir -p "$BASE/standards"
+  local n=0 f
+  while IFS= read -r f; do
+    cp "$f" "$BASE/standards/"
+    n=$((n + 1))
+  done < <(find "$proj/standards" -maxdepth 1 -name '*.yaml' 2>/dev/null)
+  echo "synced $n standard(s) -> $BASE/standards"
+}
+
+# ---------------------------------------------------------------- dispatch
 cmd="${1:-help}"; [ $# -gt 0 ] && shift || true
+
+if have_python && [ "$cmd" != "serve" ]; then
+  exec env PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}" \
+    AGENT_STANDARDS_PROFILE="$PROFILE" AGENT_STANDARDS_BASE="$BASE" \
+    python3 -m agent_standards.cli "$cmd" "$@"
+fi
+
 case "$cmd" in
-  --version|-v) echo "$VERSION" ;;
-  init)   shell_init "$@" ;;
-  list)   shell_list "$@" ;;
-  inject) shell_inject "$@" ;;
+  --version|-v) echo "$VERSION${AGENT_STANDARDS_NO_PYTHON:+-shell}" ;;
+  init)    shell_init "$@" ;;
+  discover) shell_discover "$@" ;;
+  list)    shell_list "$@" ;;
+  inject)  [ $# -ge 1 ] || { echo 'usage: inject "query" [N] [PATH]' >&2; exit 2; }
+           shell_inject "$@" ;;
+  export)  shell_export "$@" ;;
+  serve)   shell_serve "$@" ;;
+  sync)    shell_sync "$@" ;;
+  review|enforce|score)
+    echo "python CLI required for: $cmd (shell mode cannot do this exactly)" >&2
+    exit 2 ;;
   help|--help|-h) shell_help ;;
-  *) echo "unknown command: $cmd (shell mode — install python3 for full CLI)" >&2; shell_help; exit 2 ;;
+  *) echo "unknown command: $cmd" >&2; shell_help; exit 2 ;;
 esac

@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>agent-standards dashboard</title>
+<style>
+  :root {
+    --bg: #0d1117; --card: #161b22; --border: #30363d;
+    --text: #e6edf3; --dim: #8b949e; --accent: #58a6ff;
+    --green: #3fb950; --yellow: #d29922; --red: #f85149;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 15px/1.5 -apple-system, "Segoe UI", Roboto, sans-serif; }
+  header { padding: 20px 24px; border-bottom: 1px solid var(--border);
+           display: flex; flex-wrap: wrap; gap: 12px; align-items: center;
+           justify-content: space-between; }
+  h1 { font-size: 18px; margin: 0; }
+  h1 span { color: var(--dim); font-weight: 400; }
+  #search { background: var(--card); border: 1px solid var(--border);
+            color: var(--text); padding: 8px 12px; border-radius: 6px;
+            width: 260px; font-size: 14px; }
+  .stats { display: flex; gap: 16px; padding: 14px 24px;
+           border-bottom: 1px solid var(--border); color: var(--dim);
+           font-size: 13px; flex-wrap: wrap; }
+  .stats b { color: var(--text); }
+  main { padding: 20px 24px; display: grid;
+         grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+         gap: 14px; }
+  .card { background: var(--card); border: 1px solid var(--border);
+          border-radius: 8px; padding: 14px 16px; }
+  .card .head { display: flex; justify-content: space-between; gap: 8px;
+                align-items: flex-start; }
+  .card h2 { font-size: 14px; margin: 0 0 6px; }
+  .card .body { color: var(--dim); font-size: 13px; white-space: pre-wrap; }
+  .card .meta { margin-top: 10px; display: flex; gap: 6px; flex-wrap: wrap; }
+  .badge { font-size: 11px; padding: 2px 8px; border-radius: 10px;
+           border: 1px solid var(--border); color: var(--dim); }
+  .badge.approved { color: var(--green); border-color: var(--green); }
+  .badge.candidate { color: var(--yellow); border-color: var(--yellow); }
+  .badge.rejected { color: var(--red); border-color: var(--red); }
+  .badge.critical { color: var(--red); border-color: var(--red);
+                    font-weight: 700; }
+  .bar { margin-top: 12px; background: #21262d; border-radius: 4px;
+         height: 8px; overflow: hidden; }
+  .bar i { display: block; height: 100%; background: var(--accent); }
+  .bar i.hi { background: var(--green); }
+  .bar i.lo { background: var(--red); }
+  .ev { font-size: 12px; color: var(--dim); margin-top: 4px; }
+  .empty { padding: 40px; color: var(--dim); text-align: center; }
+  footer { padding: 14px 24px; border-top: 1px solid var(--border);
+           color: var(--dim); font-size: 12px; }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+<header>
+  <h1>agent-standards <span id="profile"></span></h1>
+  <input id="search" type="search" placeholder="filter standards...">
+</header>
+<div class="stats" id="stats"></div>
+<main id="cards"></main>
+<div class="empty" id="empty" hidden>
+  No standards yet — run <code>agent-standards discover .</code>
+</div>
+<footer>
+  Evidence is followed/observed from AST mining of this codebase.
+  Experimental/educational tool — standards are claims, evidence is the proof.
+</footer>
+<script>
+/* Data is embedded at build time; falls back to standards.json over http. */
+let DATA = __STANDARDS_JSON__;
+
+function pct(x) { return Math.round((x || 0) * 100); }
+
+function esc(s) {
+  return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
+    return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;",
+             "'": "&#39;" }[c];
+  });
+}
+
+function render() {
+  var q = document.getElementById("search").value.trim().toLowerCase();
+  var rows = DATA.standards.filter(function (s) {
+    return !q || (s.title + " " + s.body + " " + (s.tags || []).join(" "))
+      .toLowerCase().indexOf(q) !== -1;
+  });
+  var approved = DATA.standards.filter(function (s) { return s.status === "approved"; });
+  var critical = approved.filter(function (s) { return s.critical; }).length;
+  document.getElementById("stats").innerHTML =
+    "<span><b>" + DATA.standards.length + "</b> standards</span>" +
+    "<span><b>" + approved.length + "</b> approved</span>" +
+    "<span><b>" + critical + "</b> critical</span>" +
+    "<span>profile: <b>" + esc(DATA.profile) + "</b></span>";
+  var main = document.getElementById("cards");
+  main.innerHTML = "";
+  document.getElementById("empty").hidden = rows.length > 0;
+  rows.forEach(function (s) {
+    var ev = s.evidence || {};
+    var cons = ev.consistency || 0;
+    var cls = cons >= 0.9 ? "hi" : (cons < 0.7 ? "lo" : "");
+    var card = document.createElement("div");
+    card.className = "card";
+    card.innerHTML =
+      "<div class='head'><div><h2>" + esc(s.title) + "</h2>" +
+      "<div class='body'>" + esc(s.body) + "</div></div></div>" +
+      "<div class='meta'>" +
+      "<span class='badge " + esc(s.status) + "'>" + esc(s.status) + "</span>" +
+      (s.critical ? "<span class='badge critical'>CRITICAL</span>" : "") +
+      (s.category ? "<span class='badge'>" + esc(s.category) + "</span>" : "") +
+      (s.tags || []).map(function (t) {
+        return "<span class='badge'>" + esc(t) + "</span>";
+      }).join("") +
+      "</div>" +
+      (ev.observed
+        ? "<div class='bar'><i class='" + cls + "' style='width:" +
+          pct(cons) + "%'></i></div>" +
+          "<div class='ev'>" + ev.followed + "/" + ev.observed +
+          " followed (" + pct(cons) + "% consistent)</div>"
+        : "");
+    main.appendChild(card);
+  });
+}
+
+function boot() {
+  document.getElementById("profile").textContent = "";
+  if (DATA.standards === null) {
+    fetch("standards.json").then(function (r) { return r.json(); })
+      .then(function (d) { DATA = d; render(); });
+  } else { render(); }
+}
+document.getElementById("search").addEventListener("input", render);
+boot();
+</script>
+</body>
+</html>

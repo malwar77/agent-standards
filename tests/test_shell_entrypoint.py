@@ -61,7 +61,7 @@ def test_shell_mode_init_creates_profile(tmp_path):
                   env_extra={"AGENT_STANDARDS_NO_PYTHON": "1"})
     assert r.returncode == 0
     assert os.path.isdir(tmp_path / "p" / "standards")
-    assert "shell mode" in r.stdout
+    assert "ready." in r.stdout
 
 
 def test_shell_mode_list(shell_profile):
@@ -100,11 +100,11 @@ def test_shell_mode_inject_unrelated_query_fails(shell_profile):
     assert "no relevant standards" in r.stderr
 
 
-def test_shell_mode_unknown_command(shell_profile):
-    r = run_shell(["discover", "."],
+def test_shell_mode_python_only_command(shell_profile):
+    r = run_shell(["review"],
                   env_extra={"AGENT_STANDARDS_NO_PYTHON": "1"})
     assert r.returncode == 2
-    assert "shell mode" in r.stderr
+    assert "python CLI required" in r.stderr
 
 
 def test_python_wrapper_matches_cli_end_to_end(tmp_path, shell_profile):
