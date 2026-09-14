@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agent-standards"
+version = "0.1.0"
+description = "Discover, index, and inject your codebase's coding standards into AI coding agents"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "malwar77" }]
+dependencies = ["PyYAML>=6.0"]
+classifiers = [
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Software Development :: Documentation",
+]
+
+[project.scripts]
+agent-standards = "agent_standards.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["agent_standards*"]
